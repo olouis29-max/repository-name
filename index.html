@@ -3,7 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Private P2P Chat</title>
+    <title>Private Short-Key P2P Chat</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
         :root {
             --bg-color: #121212;
@@ -34,28 +35,28 @@
         }
 
         .hidden { display: none !important; }
-
         h2 { margin-top: 0; color: var(--accent-color); }
         
         label {
             display: block;
-            margin: 10px 0 5px;
+            margin: 15px 0 5px;
             font-size: 0.9rem;
             color: var(--text-muted);
         }
 
-        textarea, input[type="text"] {
+        input[type="text"] {
             width: 100%;
-            padding: 10px;
+            padding: 12px;
             background: #2d2d2d;
             border: 1px solid #444;
             color: #fff;
             border-radius: 6px;
             box-sizing: border-box;
             font-family: monospace;
+            font-size: 1.1rem;
+            text-align: center;
+            letter-spacing: 2px;
         }
-
-        textarea { height: 80px; resize: none; }
 
         button {
             width: 100%;
@@ -76,7 +77,6 @@
         button.danger { background-color: #d9534f; }
         button.danger:hover { background-color: #c9302c; }
 
-        /* Chat Screen Styles */
         #chat-box {
             height: 300px;
             border: 1px solid #444;
@@ -87,55 +87,41 @@
             margin-bottom: 10px;
         }
 
-        .msg { margin-bottom: 10px; padding: 8px 12px; border-radius: 6px; max-width: 80%; }
+        .msg { margin-bottom: 10px; padding: 8px 12px; border-radius: 6px; max-width: 80%; line-height: 1.4; }
         .msg.me { background: var(--accent-color); margin-left: auto; text-align: right; color: white; }
         .msg.peer { background: #333; margin-right: auto; }
         .msg.system { background: #222; color: var(--text-muted); margin: 5px auto; text-align: center; font-size: 0.8rem; max-width: 100%; }
 
         #chat-input-area { display: flex; gap: 10px; }
-        #chat-input-area input { flex-grow: 1; }
+        #chat-input-area input { flex-grow: 1; text-align: left; font-size: 1rem; letter-spacing: normal; }
         #chat-input-area button { width: auto; margin: 0; }
         
-        .status-bar {
-            font-size: 0.85rem;
-            color: var(--text-muted);
-            margin-top: 10px;
-            text-align: center;
-        }
+        .status-bar { font-size: 0.85rem; color: var(--text-muted); margin-top: 10px; text-align: center; }
     </style>
 </head>
 <body>
 
 <div class="container">
-    <div id="setup-screen">
+    <div id="start-screen">
         <h2>Private P2P Chat</h2>
-        <p style="color: var(--text-muted); font-size: 0.9rem;">Direct, encrypted connection. No servers store your logs.</p>
-        
-        <button id="btn-initiate">Host a Chat (Generate Key)</button>
-        <button id="btn-join-mode" class="secondary">Join an Existing Chat</button>
+        <p style="color: var(--text-muted); font-size: 0.9rem;">Connect securely using a disposable 8-character key.</p>
+        <button id="btn-create-mode">Generate Disposable Key</button>
+        <button id="btn-join-mode" class="secondary">Enter Existing Key</button>
     </div>
 
     <div id="host-screen" class="hidden">
-        <h2>Host a Chat</h2>
-        <label>1. Copy this generated disposable key and send it to your peer:</label>
-        <textarea id="local-offer" readonly onclick="this.select()"></textarea>
-        
-        <label>2. Paste the key your peer sends back here:</label>
-        <textarea id="remote-answer" placeholder="Paste peer's key here..."></textarea>
-        <button id="btn-connect-host">Connect</button>
+        <h2>Your Disposable Key</h2>
+        <label>Share this key with your peer to connect:</label>
+        <input type="text" id="generated-key" readonly onclick="this.select()">
+        <p class="status-bar" id="host-status">Waiting for peer to enter key...</p>
     </div>
 
     <div id="join-screen" class="hidden">
-        <h2>Join a Chat</h2>
-        <label>1. Paste the key your peer sent you:</label>
-        <textarea id="remote-offer" placeholder="Paste host's key here..."></textarea>
-        <button id="btn-generate-answer">Generate Return Key</button>
-
-        <div id="join-reply-area" class="hidden">
-            <label>2. Send this return key back to the host:</label>
-            <textarea id="local-answer" readonly onclick="this.select()"></textarea>
-            <p style="font-size: 0.85rem; color: var(--text-muted);">Waiting for host to click connect...</p>
-        </div>
+        <h2>Enter Key</h2>
+        <label>Paste or type the 8-character key:</label>
+        <input type="text" id="input-key" placeholder="XXXXXXXX" maxlength="8">
+        <button id="btn-connect-join">Connect to Peer</button>
+        <p class="status-bar" id="join-status"></p>
     </div>
 
     <div id="chat-screen" class="hidden">
@@ -146,112 +132,95 @@
             <button id="btn-send">Send</button>
         </div>
         <button id="btn-end-chat" class="danger">End Chat (0/2 Votes)</button>
-        <div id="status-text" class="status-bar">Connected directly to peer.</div>
+        <div id="status-text" class="status-bar">Connected via end-to-end P2P.</div>
     </div>
 </div>
 
 <script>
-    // WebRTC configuration using public STUN servers (used only to find public IP routing paths, no data touches them)
-    const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
-    let peerConnection;
-    let dataChannel;
-    let amIHost = false;
+    let peer = null;
+    let conn = null;
     let disconnectVoted = false;
     let peerDisconnectVoted = false;
 
-    // DOM Elements
-    const setupScreen = document.getElementById('setup-screen');
+    // DOM Screens
+    const startScreen = document.getElementById('start-screen');
     const hostScreen = document.getElementById('host-screen');
     const joinScreen = document.getElementById('join-screen');
     const chatScreen = document.getElementById('chat-screen');
-    
-    // --- Navigation Logic ---
-    document.getElementById('btn-initiate').onclick = async () => {
-        amIHost = true;
-        setupScreen.classList.add('hidden');
+
+    // Helper: Generate random 8-character alphanumeric key
+    function generateShortKey() {
+        const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+        let result = '';
+        for (let i = 0; i < 8; i++) {
+            result += chars.charAt(Math.floor(Math.random() * chars.length));
+        }
+        return result;
+    }
+
+    // --- Host Mode ---
+    document.getElementById('btn-create-mode').onclick = () => {
+        startScreen.classList.add('hidden');
         hostScreen.classList.remove('hidden');
-        await initializeP2P(true);
+        
+        const shortKey = generateShortKey();
+        document.getElementById('generated-key').value = shortKey;
+
+        // Initialize PeerJS broker server room using our custom 8-character ID
+        peer = new Peer(shortKey);
+
+        peer.on('open', (id) => {
+            document.getElementById('host-status').innerText = "Key active. Waiting for peer...";
+        });
+
+        // Listen for the incoming connection from the joiner
+        peer.on('connection', (connection) => {
+            conn = connection;
+            setupDataChannel();
+        });
+
+        peer.on('error', (err) => {
+            alert("Error creating room. Try generating a new key.");
+            window.location.reload();
+        });
     };
 
+    // --- Join Mode ---
     document.getElementById('btn-join-mode').onclick = () => {
-        amIHost = false;
-        setupScreen.classList.add('hidden');
+        startScreen.classList.add('hidden');
         joinScreen.classList.remove('hidden');
     };
 
-    // --- WebRTC Core Logic ---
-    async function initializeP2P(isHost) {
-        peerConnection = new RTCPeerConnection(configuration);
+    document.getElementById('btn-connect-join').onclick = () => {
+        const targetKey = document.getElementById('input-key').value.trim().toUpperCase();
+        if (targetKey.length !== 8) return alert("Key must be exactly 8 characters.");
 
-        if (isHost) {
-            // Host creates the data channel
-            dataChannel = peerConnection.createDataChannel("chat");
-            setupDataChannelHandlers();
-            
-            const offer = await peerConnection.createOffer();
-            await peerConnection.setLocalDescription(offer);
-            
-            // Wait for ICE candidates to finish gathering so we can give the user one complete copy-paste key
-            peerConnection.onicecandidate = (e) => {
-                if (!e.candidate) {
-                    // Encryption wrapper to safely encode the configuration as a "key" string
-                    document.getElementById('local-offer').value = btoa(JSON.stringify(peerConnection.localDescription));
-                }
-            };
-        } else {
-            // Joiner listens for data channel
-            peerConnection.ondatachannel = (event) => {
-                dataChannel = event.channel;
-                setupDataChannelHandlers();
-            };
-        }
-    }
+        document.getElementById('join-status').innerText = "Connecting...";
 
-    // Host finishes connection after pasting Joiner's key
-    document.getElementById('btn-connect-host').onclick = async () => {
-        const encryptedAnswer = document.getElementById('remote-answer').value.trim();
-        if(!encryptedAnswer) return alert("Please enter the peer's key.");
+        // Create a random identity for ourselves, then connect to the host's 8-character key
+        peer = new Peer();
         
-        const answer = JSON.parse(atob(encryptedAnswer));
-        await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+        peer.on('open', () => {
+            conn = peer.connect(targetKey);
+            setupDataChannel();
+        });
+
+        peer.on('error', (err) => {
+            document.getElementById('join-status').innerText = "Failed to connect. Verify the key.";
+        });
     };
 
-    // Joiner inputs Host key and builds a response key
-    document.getElementById('btn-generate-answer').onclick = async () => {
-        const encryptedOffer = document.getElementById('remote-offer').value.trim();
-        if(!encryptedOffer) return alert("Please enter the host's key.");
-        
-        await initializeP2P(false);
-        const offer = JSON.parse(atob(encryptedOffer));
-        await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
-        
-        const answer = await peerConnection.createAnswer();
-        await peerConnection.setLocalDescription(answer);
-
-        peerConnection.onicecandidate = (e) => {
-            if (!e.candidate) {
-                document.getElementById('local-answer').value = btoa(JSON.stringify(peerConnection.localDescription));
-                document.getElementById('join-reply-area').classList.remove('hidden');
-            }
-        };
-    };
-
-    // --- Data Channel Events & Messaging ---
-    function setupDataChannelHandlers() {
-        dataChannel.onopen = () => {
+    // --- Universal Data Channel Logic ---
+    function setupDataChannel() {
+        conn.on('open', () => {
+            // Switch views to the active chat UI
             hostScreen.classList.add('hidden');
             joinScreen.classList.add('hidden');
             chatScreen.classList.remove('hidden');
-            appendSystemMessage("Secure Connection Established.");
-        };
+            appendSystemMessage("Secure End-to-End Connection Established.");
+        });
 
-        dataChannel.onclose = () => {
-            appendSystemMessage("Connection closed.");
-            disableChat();
-        };
-
-        dataChannel.onmessage = (event) => {
-            const data = JSON.parse(event.data);
+        conn.on('data', (data) => {
             if (data.type === 'msg') {
                 appendMessage(data.value, 'peer');
             } else if (data.type === 'signal-disconnect') {
@@ -260,9 +229,15 @@
                 appendSystemMessage("Peer voted to end the chat.");
                 checkMutualDisconnect();
             }
-        };
+        });
+
+        conn.on('close', () => {
+            appendSystemMessage("Connection severed.");
+            disableChat();
+        });
     }
 
+    // --- Messaging Functionality ---
     function appendMessage(text, side) {
         const box = document.getElementById('chat-box');
         const el = document.createElement('div');
@@ -284,9 +259,9 @@
     function sendMessage() {
         const input = document.getElementById('msg-input');
         const val = input.value.trim();
-        if (!val || !dataChannel || dataChannel.readyState !== "open") return;
+        if (!val || !conn) return;
         
-        dataChannel.send(JSON.stringify({ type: 'msg', value: val }));
+        conn.send({ type: 'msg', value: val });
         appendMessage(val, 'me');
         input.value = '';
     }
@@ -294,7 +269,7 @@
     document.getElementById('btn-send').onclick = sendMessage;
     document.getElementById('msg-input').onkeypress = (e) => { if(e.key === 'Enter') sendMessage(); };
 
-    // --- Mutual Disconnect Logic ---
+    // --- Mutual Disconnect Logic (2/2 Votes) ---
     const endBtn = document.getElementById('btn-end-chat');
     
     endBtn.onclick = () => {
@@ -303,9 +278,8 @@
             updateDisconnectUI();
             appendSystemMessage("You voted to end the chat. Waiting for your peer...");
             
-            // Send signal to peer over the secure line
-            if (dataChannel && dataChannel.readyState === "open") {
-                dataChannel.send(JSON.stringify({ type: 'signal-disconnect' }));
+            if (conn) {
+                conn.send({ type: 'signal-disconnect' });
             }
             checkMutualDisconnect();
         }
@@ -324,10 +298,10 @@
 
     function checkMutualDisconnect() {
         if (disconnectVoted && peerDisconnectVoted) {
-            appendSystemMessage("Both parties agreed. Closing room securely...");
+            appendSystemMessage("Both parties agreed. Closing chat safely...");
             setTimeout(() => {
-                if(dataChannel) dataChannel.close();
-                if(peerConnection) peerConnection.close();
+                if(conn) conn.close();
+                if(peer) peer.destroy();
                 disableChat();
             }, 1000);
         }
